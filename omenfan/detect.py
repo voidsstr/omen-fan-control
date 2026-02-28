@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from .ec import (ECAccess, ECPortIO, ECDummy, EC_MAPS, ECRegisterMap,
                  ECMS_BASE, find_regmap, is_known_board, _ALL_LAPTOP_BOARDS,
                  _OMEN_DESKTOP_BOARDS)
+from .hwmon import discover_hwmon_fans
 from .wmi import wmi_available, try_load_acpi_call, probe_wmi_path, wmi_fan_count
 
 
@@ -43,6 +44,8 @@ class SystemCapabilities:
 
     # Sensors
     hwmon_devices: dict = field(default_factory=dict)  # {name: path}
+    hwmon_fans: list = field(default_factory=list)     # list[HwmonFan]
+    has_hwmon_fans: bool = False
     network_interfaces: list = field(default_factory=list)
     block_devices: list = field(default_factory=list)   # [(name, size_str, model)]
     has_battery: bool = False
@@ -330,6 +333,32 @@ def detect() -> SystemCapabilities:
             name = _read_file(os.path.join(path, "name"))
             if name:
                 caps.hwmon_devices[name] = path
+    except Exception:
+        pass
+
+    # ── hwmon fans ─────────────────────────────────────────────
+    try:
+        # Skip HP-specific hwmon drivers when EC/WMI is active to avoid
+        # double-counting the same fans
+        skip_names = set()
+        if caps.ec_method != "none" or caps.wmi_available:
+            skip_names.update({"hp_wmi", "hp-wmi", "hp_wmi_sensors"})
+
+        caps.hwmon_fans = discover_hwmon_fans(skip_names=frozenset(skip_names))
+        caps.has_hwmon_fans = len(caps.hwmon_fans) > 0
+
+        # If no hwmon fans found and we're root, try loading common fan drivers
+        if not caps.has_hwmon_fans and os.geteuid() == 0:
+            for mod in ("nct6775", "it87", "dell-smm-hwmon", "thinkpad_acpi"):
+                try:
+                    subprocess.run(["modprobe", mod],
+                                   capture_output=True, timeout=5)
+                except Exception:
+                    pass
+            # Re-scan after loading modules
+            caps.hwmon_fans = discover_hwmon_fans(
+                skip_names=frozenset(skip_names))
+            caps.has_hwmon_fans = len(caps.hwmon_fans) > 0
     except Exception:
         pass
 

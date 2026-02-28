@@ -1,107 +1,97 @@
 # omenfan
 
-A terminal-based system monitor and fan controller for HP OMEN desktops and laptops. Pure Python, zero dependencies — uses only the standard library and Linux sysfs/proc interfaces.
+Linux fan control and system monitor. Works on **any PC** with standard hwmon fan drivers, plus full EC/WMI support for HP OMEN hardware. Pure Python, zero dependencies.
 
-<img width="1705" height="686" alt="Screenshot 2026-02-28 at 10 42 16 AM" src="https://github.com/user-attachments/assets/965063b5-4cdd-4231-9cfe-06119d3c32f7" />
+<img width="1705" height="686" alt="Screenshot 2026-02-28 at 10 42 16 AM" src="https://github.com/user-attachments/assets/965063b5-4cdd-4231-9cfe-06119d3c32f7" />
 
+## Install
+
+```bash
+# One-command install (detects distro, installs lm-sensors + fan drivers):
+git clone https://github.com/voidsstr/omen-fan-control.git
+cd omen-fan-control
+sudo ./install.sh
+
+# Or just run directly (no install needed):
+sudo python3 -m omenfan
+
+# Monitor-only (no root):
+python3 -m omenfan
+
+# Standalone binary (no install, just copy and run):
+sudo python3 omenfan.pyz
+```
+
+## Supported Hardware
+
+### Universal (any Linux PC via hwmon)
+
+Works with any motherboard whose Super I/O chip has a Linux driver:
+
+| Chip Family | Driver | Common Boards |
+|-------------|--------|---------------|
+| Nuvoton NCT6775-6799D | `nct6775` | ASUS, MSI, Gigabyte |
+| ITE IT8688E-87xxF | `it87` | Gigabyte, ASUS |
+| Fintek F71xxx | `f71882fg` | ASRock |
+| Winbond W836xx | `w83627ehf` | Legacy boards |
+| SMSC/Microchip SCH5627 | `sch5627` | Server/embedded |
+| Dell laptops | `dell-smm-hwmon` | All Dell with fan control |
+| ThinkPad | `thinkpad_acpi` | All ThinkPads |
+| Apple | `applesmc` | MacBooks running Linux |
+
+The `install.sh` script runs `sensors-detect` to automatically probe and load the right driver for your motherboard.
+
+### HP OMEN (full EC + WMI support)
+
+Full fan curve editing, performance mode switching, and direct EC register access:
+
+- **Desktops**: OMEN 45L GT22 (8D2C), OMEN 30L GT13 (8703), OMEN 880 (8437)
+- **Laptops**: 67+ known board IDs — OMEN 15/16/17 (2019-2023+), Victus, Victus S
 
 ## Features
 
-- **Fan control** — Switch between Quiet, Balanced, and Performance BIOS profiles. Force max fan speed or apply a temperature-based aggressive curve. Edit individual fan curve points in the EC.
-- **Live monitoring** — CPU usage, frequency, load, per-core bars. Memory, swap, cache breakdown. Disk usage and I/O rates. Network RX/TX per interface. NVIDIA GPU utilization, power, VRAM, clocks. Battery status on laptops.
-- **Braille graphics** — Smooth filled line graphs and gradient bars using Unicode braille characters. Animated fan spinner icons that scale with RPM.
-- **Adaptive layout** — Three-column (120+ cols), two-column (80+), or stacked single-column (50+) layouts that respond to terminal size.
-- **Multi-model support** — 67+ known HP OMEN board IDs across desktop (45L, 30L, 880), OMEN laptop (15/16/17 from 2019-2023+), HP Victus, and Victus S families. Unknown boards get a best-guess generic register map.
-- **Graceful degradation** — Runs as a system monitor without root. Each sensor independently try/excepted — a broken nvidia-smi or missing EC doesn't crash the TUI.
-- **Zero dependencies** — Pure Python 3.8+ standard library. No pip packages needed.
-
-## Requirements
-
-- Linux (kernel 4.x+)
-- Python 3.8+
-- Root access for fan control (optional — runs in monitor-only mode without root)
-- `acpi_call` kernel module for WMI BIOS interface (fan profiles, performance modes)
-- `/dev/mem` access for desktop EC mmap, or `ec_sys` module for laptop EC access
-
-## Installation
-
-### Quick start (no install)
-
-```bash
-git clone https://github.com/voidsstr/omen-fan-control.git
-cd omen-fan-control
-
-# Full mode (fan control + monitoring):
-sudo python3 -m omenfan
-
-# Monitor-only (no root needed):
-python3 -m omenfan
-```
-
-### Install as package
-
-```bash
-pip install .
-sudo omenfan
-```
-
-### Install acpi_call (required for fan control)
-
-The `acpi_call` kernel module provides the WMI BIOS interface used to switch fan profiles and performance modes.
-
-| Distro | Command |
-|--------|---------|
-| Ubuntu / Debian / Mint / Pop!_OS | `sudo apt install acpi-call-dkms` |
-| Arch / Manjaro / EndeavourOS | `sudo pacman -S acpi_call` |
-| openSUSE | `sudo zypper install acpi_call-kmp-default` |
-| Fedora / RHEL | Build from source with DKMS |
-| Gentoo | `sudo emerge sys-power/acpi_call` |
-| NixOS | Add `acpi_call` to `boot.extraModulePackages` |
-| Void | `sudo xbps-install -S acpi_call-dkms` |
-
-Load the module:
-
-```bash
-sudo modprobe acpi_call
-```
-
-To load on boot, add `acpi_call` to `/etc/modules-load.d/acpi_call.conf`.
+- **Fan control** — Max fan speed, temperature-based aggressive curve. HP OMEN: BIOS profile switching (Quiet/Balanced/Performance), fan curve editing.
+- **Universal hwmon backend** — Discovers and controls fans via standard Linux `/sys/class/hwmon` interface. Works on any PC with a supported Super I/O driver.
+- **Live monitoring** — CPU usage/frequency/load/per-core, memory/swap, disk usage/I/O, network RX/TX, NVIDIA GPU, thermal zones, battery.
+- **Braille graphics** — Smooth sparklines and gradient bars using Unicode braille characters. Animated fan spinner icons scaled by RPM.
+- **Adaptive layout** — Three-column (120+), two-column (80+), or stacked (50+) based on terminal width.
+- **Safe defaults** — Minimum 25% PWM floor prevents fan stall. Original fan modes saved and restored on exit (including SIGTERM/SIGINT).
+- **Graceful degradation** — Runs as system monitor without root. Each sensor independently try/excepted.
+- **Zero dependencies** — Pure Python 3.8+ stdlib. No pip packages.
 
 ## Usage
 
 ```
-omenfan [OPTIONS]
+sudo omenfan [OPTIONS]
 
 Options:
   --max             Start with all fans at 100%
   --aggressive      Start with temperature-based aggressive curve
   --monitor-only    System monitoring only, no fan control
-  --dump-ec         Print raw EC register dump and exit
+  --dump-ec         Print raw EC register dump (HP OMEN only)
   --version         Show version
 ```
 
 ### Keyboard Controls
 
-| Key | Action |
-|-----|--------|
-| `1` | Balanced profile |
-| `2` | Quiet profile |
-| `3` | Performance profile |
-| `4` | Toggle max fan speed (all fans 100%) |
-| `5` | Toggle aggressive temperature curve |
-| `6` | Enter/exit fan curve editor |
-| `7` | All curve points -100 RPM |
-| `8` | All curve points +100 RPM |
-| Arrow keys | Navigate curve points / adjust RPM (in edit mode) |
-| `q` / `Esc` | Quit (restores fans to safe state) |
+| Key | Action | Requires |
+|-----|--------|----------|
+| `1` | Balanced profile | HP OMEN (WMI) |
+| `2` | Quiet profile | HP OMEN (WMI) |
+| `3` | Performance profile | HP OMEN (WMI) |
+| `4` | Toggle max fan speed | Any controllable fan |
+| `5` | Toggle aggressive temp curve | Any controllable fan |
+| `6` | Enter/exit fan curve editor | HP OMEN (EC curves) |
+| `7` / `8` | All curve points -/+100 RPM | HP OMEN (EC curves) |
+| Arrow keys | Navigate/adjust curve points | Edit mode |
+| `q` / `Esc` | Quit (restores fans) | |
 
-### Auto-detection behavior
+### Auto-detection
 
-- **Not root** — Automatically enters monitor-only mode. All sysfs/proc sensors still work (CPU, memory, disk, network, GPU, thermals). No fan control.
-- **Root, no acpi_call** — EC-only mode. Desktop front fan duty works via EC registers. No WMI profile switching.
-- **Root, no EC** — WMI-only mode. Can switch profiles but can't read EC temperatures or fan RPMs.
-- **Root, full access** — EC + WMI. Full fan control and monitoring.
-- **Non-OMEN hardware** — Pure system monitor. No EC or WMI panels, but CPU/memory/disk/network/GPU/thermal monitoring works on any Linux machine.
+- **Not root** — Monitor-only mode. All sysfs/proc sensors work.
+- **Root + hwmon fans** — Discovers fans via `/sys/class/hwmon`, controls via PWM.
+- **Root + HP OMEN EC/WMI** — Full OMEN fan control + hwmon fans.
+- **Non-OMEN, no hwmon fans** — Pure system monitor.
 
 ## How It Works
 
@@ -109,104 +99,39 @@ Options:
 
 ```
 omenfan/
-├── __init__.py     # Package version
-├── __main__.py     # Entry point, argument parsing, curses wrapper
-├── detect.py       # Hardware detection and capability probing
-├── ec.py           # EC access: mmap (/dev/mem), ec_sys, dummy fallback
-├── wmi.py          # WMI BIOS interface via acpi_call
-├── sensors.py      # System metrics (CPU, mem, disk, net, GPU, thermal, battery)
-├── fan.py          # Fan controller, profiles, curves
-├── tui.py          # TUI rendering and input handling
-├── widgets.py      # Rendering primitives (boxes, bars, sparklines, braille icons)
-└── theme.py        # Color scheme and gradient definitions
+├── __main__.py     # Entry point, signal handlers, curses wrapper
+├── detect.py       # Hardware detection (DMI, EC, WMI, hwmon)
+├── hwmon.py        # Generic hwmon fan discovery + PWM control
+├── ec.py           # HP OMEN EC access (mmap, ec_sys, dummy)
+├── wmi.py          # HP OMEN WMI BIOS interface (acpi_call)
+├── sensors.py      # System metrics (CPU, mem, disk, net, GPU, thermal)
+├── fan.py          # Fan controller (EC + WMI + hwmon backends)
+├── tui.py          # TUI rendering and input
+├── widgets.py      # Braille bars, sparklines, fan icons
+└── theme.py        # Color scheme
 ```
 
-### EC (Embedded Controller)
+### Fan Control Priority
 
-HP OMEN systems expose an Embedded Controller that provides direct access to hardware sensors and fan control registers.
+1. **HP OMEN EC/WMI** — Used when detected (direct register control, BIOS profiles)
+2. **hwmon PWM** — Universal fallback via `/sys/class/hwmon/*/pwm*`
+3. **Monitor only** — Read-only fan RPMs when no control interface available
 
-**Desktops** use a memory-mapped EC at `0xFD500000` (1024 bytes), accessed via `/dev/mem`. This contains temperature registers (CPU, board, VRM, DIMM), fan RPM counters (16-bit big-endian), fan duty registers (PWM 0-100 for front fans), performance mode state, and stored fan curves (Balanced, Quiet, Performance with temp→RPM point pairs).
+### Safety
 
-**Laptops** use the standard ACPI EC at port I/O addresses, accessed via `/sys/kernel/debug/ec/ec0/io` (the `ec_sys` kernel module). Laptop registers follow the OmenMon layout: CPU temp at `0x57`, GPU temp at `0xB7`, fan RPMs at `0xB0-0xB3`, manual mode toggle at `0x62`, and fan speed percentage registers at `0x2C-0x2D`.
-
-Desktop BIOS only controls the 2 rear fans through thermal profiles. The 3 front fans have no BIOS curve — omenfan manages them directly via EC PWM duty registers with a temperature-based curve.
-
-### WMI BIOS Interface
-
-WMI calls go through `/proc/acpi/call` (the `acpi_call` kernel module). Each call packs a 16-byte header (signature `SECU`, command type `0x20008`, command ID, data length) plus a variable-length payload, then writes it as an ACPI method call to `\_SB.WMID.WMAA` (desktops) or `\_SB.WMI.WMAA` (laptops).
-
-Key WMI commands:
-- `0x10` — Fan count query (also used as keepalive)
-- `0x29` — Set performance mode (0=Quiet, 1=Balanced, 3=Performance)
-- `0x2E` — Set fan speeds (2 bytes = rear only, 6 bytes = all 5 fans)
-- `0x27` — Toggle max fan mode
-
-### Fan Profiles
-
-| Profile | Rear Fans | Front Fans | Description |
-|---------|-----------|------------|-------------|
-| Auto (Balanced/Quiet/Perf) | BIOS-controlled via WMI | EC duty from temp curve | BIOS manages rear fans; omenfan manages front fans based on CPU temperature |
-| Aggressive | WMI duty bytes | EC duty from aggressive curve | Temperature-reactive: 30% at 40C up to 100% at 80C+ |
-| Max | WMI 0xE0 all fans | EC duty 100% | All fans full speed |
-
-### Sensor Collection
-
-All sensors are read from standard Linux interfaces — no proprietary tools or libraries needed:
-
-| Sensor | Source |
-|--------|--------|
-| CPU usage (overall + per-core) | `/proc/stat` delta between reads |
-| CPU frequency | `/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq` |
-| Load average | `/proc/loadavg` |
-| Memory / swap | `/proc/meminfo` |
-| Disk usage | `os.statvfs()` on mounted filesystems |
-| Disk I/O | `/proc/diskstats` delta |
-| Network RX/TX | `/sys/class/net/*/statistics/` delta |
-| NVIDIA GPU | `nvidia-smi` CSV query (temp, fan, util, power, VRAM, clocks) |
-| Thermal zones | `/sys/class/hwmon/*/temp*_input` and `/sys/class/thermal/thermal_zone*/temp` |
-| EC temps/RPMs | Direct EC register reads (mmap or ec_sys) |
-| Battery | `/sys/class/power_supply/BAT*/` |
-
-Each sensor is independently try/excepted with failure counting. After 3 consecutive failures, a sensor is disabled to avoid repeated error overhead.
-
-## Supported Models
-
-### Desktops (memory-mapped EC)
-
-| Board ID | Model |
-|----------|-------|
-| `8D2C` | OMEN 45L GT22-2xxx |
-| `89EB` | OMEN Desktop |
-| `8703` | OMEN 30L GT13 |
-| `8437` | OMEN Desktop 880 |
-
-### OMEN Laptops
-
-67 known board IDs across generations:
-- **v0 thermal** (6 boards): 8607, 8746-874A
-- **v1 thermal** (49 boards): OMEN 15/16/17 from 2019 through 2023+ (84DA-8BAD)
-- **Victus** (1 board): 8A25
-- **Victus S** (7 boards): 8BBE, 8BD4-8D41
-
-Unknown OMEN boards are detected via DMI product name and assigned a generic register map based on chassis type (laptop vs desktop).
-
-## EC Register Dump
-
-If your OMEN model isn't in the database, you can contribute a register dump:
-
-```bash
-sudo python3 -m omenfan --dump-ec > ec_dump.txt
-```
-
-This prints the raw EC register space with your board name and EC method. Open an issue with the dump and your model name to help expand hardware support.
+- PWM writes clamped to minimum 25% duty (64/255) to prevent fan stall
+- Original `pwm_enable` mode + PWM value saved before first manual write
+- Restored on exit via `cleanup()`, including on SIGTERM/SIGINT
+- HP-specific hwmon drivers (`hp_wmi`) skipped when EC/WMI active (prevents double-counting)
 
 ## Kernel Lockdown
 
-On systems with Secure Boot enabled, kernel lockdown blocks `/dev/mem` access. Options:
+On Secure Boot systems, kernel lockdown blocks `/dev/mem`. Options:
+1. Disable Secure Boot (removes lockdown)
+2. Use `ec_sys` module (automatic fallback)
+3. Monitor-only mode (works regardless)
 
-1. **Disable Secure Boot** in BIOS — removes lockdown entirely
-2. **Use `ec_sys` instead** — omenfan automatically falls back to ec_sys if mmap fails (with reduced register access on desktops)
-3. **Monitor-only mode** — all sysfs/proc sensors work regardless of lockdown
+hwmon fan control is **not affected** by kernel lockdown.
 
 ## License
 

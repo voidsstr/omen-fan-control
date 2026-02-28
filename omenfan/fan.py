@@ -2,6 +2,7 @@
 
 from . import wmi as wmi_mod
 from .ec import ECRegisterMap, EC_MAPS
+from .hwmon import set_hwmon_fan_manual, set_hwmon_fan_auto, restore_all_hwmon_fans
 
 MAX_RPM = 3200
 MAX_TEMP = 100
@@ -89,10 +90,11 @@ class FanController:
     Laptop:  2 fans (CPU + GPU) via manual mode register + fan_set_pct.
     """
 
-    def __init__(self, ec, regmap, wmi_path=None):
+    def __init__(self, ec, regmap, wmi_path=None, hwmon_fans=None):
         self.ec = ec
         self.regmap = regmap
         self.wmi_path = wmi_path
+        self.hwmon_fans = hwmon_fans or []
         self.profile = PROFILE_NONE
         self.fan_max = False
         self.perf_mode = 1  # default Balanced; updated by initialize()
@@ -100,16 +102,17 @@ class FanController:
         self._has_wmi = wmi_path is not None and wmi_mod.wmi_available()
         self._has_ec = ec.method != "none"
         self._is_laptop = regmap.chassis == "laptop"
+        self._has_hwmon = any(f.can_control for f in self.hwmon_fans)
 
     @property
     def can_control(self):
         """Whether any fan control is possible."""
-        return self._has_wmi or self._has_ec
+        return self._has_wmi or self._has_ec or self._has_hwmon
 
     @property
     def fan_count(self):
-        """Total number of fans from register map."""
-        return len(self.regmap.fan_labels)
+        """Total number of fans from register map + hwmon."""
+        return len(self.regmap.fan_labels) + len(self.hwmon_fans)
 
     def initialize(self):
         """Called at startup: detect current state without changing fans."""
@@ -160,6 +163,10 @@ class FanController:
                 # Desktop: set front fan PWM duty to 100%
                 for reg in self.regmap.fan_front_duty:
                     self.ec.write(reg, 100)
+        # hwmon fans: set all controllable fans to 100%
+        for fan in self.hwmon_fans:
+            if fan.can_control:
+                set_hwmon_fan_manual(fan, 100)
 
     def apply_aggressive(self, cpu_temp):
         """Apply aggressive temperature-based curve."""
@@ -198,6 +205,10 @@ class FanController:
                 # Desktop: set front fan PWM duty
                 for reg in self.regmap.fan_front_duty:
                     self.ec.write(reg, duty)
+        # hwmon fans: apply aggressive duty
+        for fan in self.hwmon_fans:
+            if fan.can_control:
+                set_hwmon_fan_manual(fan, duty)
 
     def stop_override(self):
         """Return to BIOS auto mode (rear fans) + temp-based auto (front fans)."""
@@ -227,6 +238,10 @@ class FanController:
                 # (keepalive will adjust based on temperature each cycle)
                 for reg in self.regmap.fan_front_duty:
                     self.ec.write(reg, 50)
+        # hwmon fans: restore to auto mode
+        for fan in self.hwmon_fans:
+            if fan.can_control:
+                set_hwmon_fan_auto(fan)
 
     def keepalive(self, cpu_temp):
         """Called every refresh cycle to maintain the active profile."""
@@ -270,6 +285,9 @@ class FanController:
                             self.ec.write(reg, duty)
         except Exception:
             pass
+        # Restore hwmon fans to original state
+        if self.hwmon_fans:
+            restore_all_hwmon_fans(self.hwmon_fans)
         self.fan_max = False
         self.profile = PROFILE_NONE
 

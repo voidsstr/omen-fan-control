@@ -5,7 +5,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "omenfan"
 version = "2.0.0"
-description = "HP OMEN fan control and system monitoring TUI"
+description = "Linux fan control and system monitoring TUI — works on any PC via hwmon, with full HP OMEN EC/WMI support"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.8"

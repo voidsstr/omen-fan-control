@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .detect import SystemCapabilities, _read_file
+from .hwmon import read_hwmon_fan, HwmonFanState
 
 
 @dataclass
@@ -110,6 +111,15 @@ class BatteryMetrics:
 
 
 @dataclass
+class HwmonFanMetrics:
+    """Fan data from hwmon sysfs interface."""
+    label: str = ""
+    rpm: int = 0
+    duty_pct: int = -1     # -1 if no PWM control
+    can_control: bool = False
+
+
+@dataclass
 class ECMetrics:
     """Temperatures and fan data from EC registers."""
     cpu_temp: int = 0
@@ -197,6 +207,7 @@ class SensorCollector:
         self.thermals = []
         self.battery = None
         self.ec = None
+        self.hwmon_fans = []      # list[HwmonFanMetrics]
         self.sysinfo = None
 
     def _try(self, name, fn):
@@ -229,6 +240,15 @@ class SensorCollector:
             self.ec = self._try("ec", lambda: self._read_ec(ec))
         elif self.ec is None:
             self.ec = ECMetrics()
+
+        # hwmon fans
+        if self.caps.has_hwmon_fans:
+            self.hwmon_fans = self._try("hwmon_fans",
+                                        self._read_hwmon_fans) or []
+
+        # CPU temp fallback from hwmon coretemp when no EC
+        if self.ec and self.ec.cpu_temp == 0:
+            self._try("cpu_temp_fallback", self._cpu_temp_fallback)
 
         # Update histories
         if self.ec and self.ec.cpu_temp > 0:
@@ -603,6 +623,41 @@ class SensorCollector:
         if regmap.heartbeat >= 0:
             m.heartbeat = ec.read(regmap.heartbeat)
         return m
+
+    def _read_hwmon_fans(self):
+        """Read all hwmon fans discovered during detect."""
+        result = []
+        for fan in self.caps.hwmon_fans:
+            state = read_hwmon_fan(fan)
+            m = HwmonFanMetrics(
+                label=fan.label,
+                rpm=state.rpm,
+                duty_pct=state.duty_pct if fan.pwm_path else -1,
+                can_control=fan.can_control,
+            )
+            result.append(m)
+        return result
+
+    def _cpu_temp_fallback(self):
+        """Populate ec.cpu_temp from hwmon coretemp/k10temp when no EC."""
+        if not self.ec:
+            return
+        # Try common CPU temp hwmon drivers
+        for name in ("coretemp", "k10temp", "zenpower", "it87", "nct6775"):
+            path = self.caps.hwmon_devices.get(name)
+            if not path:
+                continue
+            # Look for Package/Tdie/temp1 (highest-level CPU temp)
+            for suffix in ("temp1_input",):
+                val = _read_file(os.path.join(path, suffix))
+                if val:
+                    try:
+                        temp = int(val) // 1000
+                        if temp > 0:
+                            self.ec.cpu_temp = temp
+                            return
+                    except ValueError:
+                        pass
 
     def _read_sysinfo(self):
         """Read basic system info."""

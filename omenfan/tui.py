@@ -60,6 +60,12 @@ class OmenFanTUI:
         self.anim[key] = cur + (target - cur) * 0.35
         return self.anim[key]
 
+    def _get_cpu_temp(self):
+        """Get best available CPU temperature (EC or hwmon fallback)."""
+        if self.sensors.ec and self.sensors.ec.cpu_temp > 0:
+            return self.sensors.ec.cpu_temp
+        return 50  # Safe default if no temp source
+
     def refresh_data(self):
         """Refresh all sensor data and fan keepalive."""
         self.sensors.refresh(ec=self.ec)
@@ -72,8 +78,7 @@ class OmenFanTUI:
 
         # Fan keepalive
         if not self.monitor_only and self.fan.can_control:
-            cpu_temp = self.sensors.ec.cpu_temp if self.sensors.ec else 0
-            self.fan.keepalive(cpu_temp)
+            self.fan.keepalive(self._get_cpu_temp())
 
     def handle_input(self, key):
         if key in (ord('q'), ord('Q'), ord('0'), 27):
@@ -85,15 +90,15 @@ class OmenFanTUI:
         if self.monitor_only:
             return
 
-        if key == ord('1'):
+        if key == ord('1') and self.fan._has_wmi:
             self.fan.stop_override()
             self.fan.set_perf_mode(1)
             self.set_status("Mode \u2192 Balanced")
-        elif key == ord('2'):
+        elif key == ord('2') and self.fan._has_wmi:
             self.fan.stop_override()
             self.fan.set_perf_mode(0)
             self.set_status("Mode \u2192 Quiet")
-        elif key == ord('3'):
+        elif key == ord('3') and self.fan._has_wmi:
             self.fan.stop_override()
             self.fan.set_perf_mode(3)
             self.set_status("Mode \u2192 Performance")
@@ -118,8 +123,7 @@ class OmenFanTUI:
                 else:
                     self.fan.fan_max = False
                     self.fan.profile = PROFILE_AGGRESSIVE
-                    cpu_temp = self.sensors.ec.cpu_temp if self.sensors.ec else 50
-                    self.fan.apply_aggressive(cpu_temp)
+                    self.fan.apply_aggressive(self._get_cpu_temp())
                     self.set_status("Aggressive curve ON")
             except Exception as e:
                 self.fan.fan_max = False
@@ -209,7 +213,12 @@ class OmenFanTUI:
         """Draw the top header bar with system identity."""
         _box(self.scr, row, mx, 4, fw)
 
-        title = "OMEN FAN CONTROL" if not self.monitor_only else "SYSTEM MONITOR"
+        if self.monitor_only:
+            title = "SYSTEM MONITOR"
+        elif self.caps.is_omen:
+            title = "OMEN FAN CONTROL"
+        else:
+            title = "FAN CONTROL"
         _s(self.scr, row + 1, mx + 3, title,
            curses.color_pair(C_TITLE) | curses.A_BOLD)
 
@@ -447,10 +456,12 @@ class OmenFanTUI:
         """Fan RPM bars with animated braille fan spinner icons."""
         ec = self.sensors.ec
         gpu = self.sensors.gpu
-        if not ec and not gpu:
+        hwmon_fans = self.sensors.hwmon_fans
+
+        if not ec and not gpu and not hwmon_fans:
             if self.monitor_only and not self.caps.is_omen:
-                return row  # No fans to show on non-OMEN in monitor mode
-            return self._draw_placeholder(row, x, w, "Fans", "No EC data")
+                return row  # No fans to show
+            return self._draw_placeholder(row, x, w, "Fans", "No fan data")
 
         fans = []
         if ec:
@@ -475,6 +486,12 @@ class OmenFanTUI:
                     pct = ec.front_duty[i] if i < len(ec.front_duty) else -1
                     suffix = f"{pct}%" if pct >= 0 else ""
                     fans.append((label, rpm, suffix, False))
+
+        # Append hwmon fans after EC fans
+        for hf in hwmon_fans:
+            suffix = f"{hf.duty_pct}%" if hf.duty_pct >= 0 else ""
+            fans.append((hf.label[:8], hf.rpm, suffix, False))
+
         if gpu and gpu.fan_pct > 0:
             fans.append(("NV GPU", gpu.fan_pct, f"{gpu.temp_c}\u00b0C", True))
 
@@ -885,9 +902,14 @@ class OmenFanTUI:
             return row
 
         cx = x + 1
-        items = [("1", "Bal"), ("2", "Qt"), ("3", "Perf"),
-                 ("4", "Max"), ("5", "Aggro"), ("6", "Edit"),
-                 ("7", "-"), ("8", "+"), ("q", "Quit")]
+        has_wmi = self.fan._has_wmi
+        items = []
+        if has_wmi:
+            items += [("1", "Bal"), ("2", "Qt"), ("3", "Perf")]
+        items += [("4", "Max"), ("5", "Aggro")]
+        if self._curves:
+            items += [("6", "Edit"), ("7", "-"), ("8", "+")]
+        items.append(("q", "Quit"))
         for key, desc in items:
             _s(self.scr, row, cx, key,
                curses.color_pair(C_KEY) | curses.A_BOLD)

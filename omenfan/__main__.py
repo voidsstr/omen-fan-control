@@ -3,12 +3,14 @@
 import argparse
 import curses
 import os
+import signal
 import sys
 
 from . import __version__
 from .detect import detect
 from .ec import open_ec, ECDummy
 from .fan import FanController, PROFILE_NONE, PROFILE_MAX, PROFILE_AGGRESSIVE
+from .hwmon import restore_all_hwmon_fans
 from .sensors import SensorCollector
 from .tui import OmenFanTUI
 
@@ -46,15 +48,29 @@ def main_tui(stdscr, caps, profile, monitor_only):
     else:
         ec = open_ec(caps.ec_method, caps.ec_base, writable=True)
 
+    fan_ctl = None
     try:
-        # Create fan controller
-        fan_ctl = FanController(ec, caps.ec_regmap, wmi_path=caps.wmi_path or None)
+        # Create fan controller (with hwmon fans for universal support)
+        fan_ctl = FanController(
+            ec, caps.ec_regmap,
+            wmi_path=caps.wmi_path or None,
+            hwmon_fans=caps.hwmon_fans,
+        )
         if not monitor_only:
             fan_ctl.initialize()
             if profile == PROFILE_MAX:
                 fan_ctl.apply_max()
             elif profile == PROFILE_AGGRESSIVE:
                 fan_ctl.profile = PROFILE_AGGRESSIVE
+
+        # Install signal handlers for clean fan restore on kill
+        def _signal_cleanup(signum, frame):
+            if fan_ctl and not monitor_only:
+                fan_ctl.cleanup()
+            sys.exit(128 + signum)
+
+        signal.signal(signal.SIGTERM, _signal_cleanup)
+        signal.signal(signal.SIGINT, _signal_cleanup)
 
         # Create sensor collector
         sensors = SensorCollector(caps)
@@ -68,6 +84,8 @@ def main_tui(stdscr, caps, profile, monitor_only):
             tui.set_status("Aggressive curve active")
         tui.run()
     finally:
+        if fan_ctl and not monitor_only:
+            fan_ctl.cleanup()
         ec.close()
 
 
@@ -75,7 +93,7 @@ def entry():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="omenfan",
-        description="HP OMEN fan control and system monitoring TUI"
+        description="Linux fan control and system monitoring TUI"
     )
     parser.add_argument("--version", action="version",
                         version=f"omenfan {__version__}")
@@ -105,16 +123,18 @@ def entry():
 
     # Auto-enable monitor-only when not root or no control available
     monitor_only = args.monitor_only
+    has_any_control = (caps.ec_method != "none" or caps.wmi_available
+                       or any(f.can_control for f in caps.hwmon_fans))
     if os.geteuid() != 0:
         monitor_only = True
-    elif caps.ec_method == "none" and not caps.wmi_available:
+    elif not has_any_control:
         monitor_only = True
 
     if monitor_only and not args.monitor_only:
         if os.geteuid() != 0:
             caps.warnings.insert(0, "Not root — running in monitor-only mode")
-        else:
-            caps.warnings.insert(0, "No EC/WMI access — running in monitor-only mode")
+        elif not has_any_control:
+            caps.warnings.insert(0, "No fan control available — monitor-only mode")
 
     curses.wrapper(lambda stdscr: main_tui(stdscr, caps, profile, monitor_only))
 
