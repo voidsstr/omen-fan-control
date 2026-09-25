@@ -97,6 +97,7 @@ class FanController:
         self.hwmon_fans = hwmon_fans or []
         self.profile = PROFILE_NONE
         self.fan_max = False
+        self._wmi_max_on = False   # firmware fan-max (WMI 0x27) engaged
         self.perf_mode = 1  # default Balanced; updated by initialize()
         self.initial_fan_duty = []
         self._has_wmi = wmi_path is not None and wmi_mod.wmi_available()
@@ -142,8 +143,13 @@ class FanController:
             if self._is_laptop:
                 wmi_mod.wmi_fan_max_set(True, wmi_path=self.wmi_path)
             else:
-                wmi_mod.wmi_fan_set(0xE0, 0xE0, 0xE0, 0xE0, 0xE0,
+                # Every channel in the payload, then the firmware's own
+                # fan-max on top: 0x2E alone leaves the 6th channel at 0 on
+                # the 45L, fan-max brings it up as well.
+                wmi_mod.wmi_fan_set(0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0,
                                     wmi_path=self.wmi_path)
+                wmi_mod.wmi_fan_max_set(True, wmi_path=self.wmi_path)
+                self._wmi_max_on = True
         if self._has_ec:
             if self._is_laptop:
                 # Enable manual mode + max fan via EC registers
@@ -179,14 +185,16 @@ class FanController:
                 break
         if self._has_wmi:
             wmi_mod.wmi_keepalive(self.wmi_path)
+            self._release_wmi_max()
             if self._is_laptop:
                 # Laptop: 2-byte payload for 2 fans
                 wmi_mod.wmi_fan_set(wmi_byte, wmi_byte,
                                     wmi_path=self.wmi_path)
             else:
-                # Desktop: 6-byte payload for all 5 fans
+                # Desktop: 6-byte payload, every byte set -- one 0x00 and
+                # the firmware drops the whole command
                 wmi_mod.wmi_fan_set(wmi_byte, wmi_byte, wmi_byte, wmi_byte,
-                                    wmi_byte, wmi_path=self.wmi_path)
+                                    wmi_byte, wmi_byte, wmi_path=self.wmi_path)
         if self._has_ec:
             if self._is_laptop:
                 # Enable manual mode, set fan speed percentages
@@ -223,6 +231,7 @@ class FanController:
                 # Front fans are NOT managed by BIOS — we handle them via
                 # EC duty in keepalive(). Don't send 6-byte with 0x00 for
                 # front fans, as that stops them (BIOS has no front fan curve).
+                self._release_wmi_max()
                 wmi_mod.wmi_fan_set(0x00, 0x00, wmi_path=self.wmi_path)
         if self._has_ec:
             if self._is_laptop:
@@ -242,6 +251,12 @@ class FanController:
         for fan in self.hwmon_fans:
             if fan.can_control:
                 set_hwmon_fan_auto(fan)
+
+    def _release_wmi_max(self):
+        """Turn off desktop firmware fan-max if MAX engaged it."""
+        if self._wmi_max_on:
+            wmi_mod.wmi_fan_max_set(False, wmi_path=self.wmi_path)
+            self._wmi_max_on = False
 
     def keepalive(self, cpu_temp):
         """Called every refresh cycle to maintain the active profile."""
@@ -268,6 +283,13 @@ class FanController:
 
     def cleanup(self):
         """Restore fans to safe state on exit."""
+        try:
+            if self._has_wmi and not self._is_laptop:
+                # Hand every channel back to the BIOS curve
+                self._release_wmi_max()
+                wmi_mod.wmi_fan_set(0x00, 0x00, wmi_path=self.wmi_path)
+        except Exception:
+            pass
         try:
             if self._has_ec:
                 if self._is_laptop:

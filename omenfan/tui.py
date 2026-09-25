@@ -594,14 +594,22 @@ class OmenFanTUI:
                     suffix = f"{pct}%" if pct >= 0 else ""
                     fans.append((label, rpm, suffix, False))
             else:
-                # Desktop: rear fans (WMI mode) + front fans (EC duty)
+                # Desktop: rear fans (WMI mode) + front fans (EC duty).
+                # Where the board exposes live per-channel duty, show that --
+                # the front duty registers can read 100% while a fan idles.
+                live = ec.fan_duty
                 for i, rpm in enumerate(ec.rear_rpms):
                     label = labels[i] if i < len(labels) else f"Rear {i+1}"
-                    fans.append((label, rpm, ec.fan_mode_name, False))
+                    suffix = (f"{live[i]}%" if i < len(live)
+                              else ec.fan_mode_name)
+                    fans.append((label, rpm, suffix, False))
                 for i, rpm in enumerate(ec.front_rpms):
                     li = len(ec.rear_rpms) + i
                     label = labels[li] if li < len(labels) else f"Front {i+1}"
-                    pct = ec.front_duty[i] if i < len(ec.front_duty) else -1
+                    if live:
+                        pct = live[li] if li < len(live) else -1
+                    else:
+                        pct = ec.front_duty[i] if i < len(ec.front_duty) else -1
                     suffix = f"{pct}%" if pct >= 0 else ""
                     fans.append((label, rpm, suffix, False))
 

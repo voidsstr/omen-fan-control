@@ -34,6 +34,10 @@ class ECRegisterMap:
     # Fan duty registers (desktop: direct PWM 0-100)
     fan_front_duty: tuple = (0x13D, 0x13E, 0x13F)
 
+    # Actual output duty per fan channel (0-100), read-only, same order as
+    # fan_rear + fan_front.  Empty = fall back to fan_front_duty for display.
+    fan_duty: tuple = ()
+
     # Laptop fan speed set/get registers (write/read percentage 0-100)
     fan_set_pct: tuple = ()
     fan_get_pct: tuple = ()
@@ -146,9 +150,17 @@ _ALL_LAPTOP_BOARDS = (_OMEN_LAPTOP_V0_BOARDS | _OMEN_LAPTOP_V1_BOARDS
 
 EC_MAPS = {
     # ── OMEN Desktops ─────────────────────────────────────────────
+    # Six fan channels: RPM at 0x120-0x12B, live output duty at 0x130-0x135.
+    # The front duty registers 0x13D-0x13F read back what is written but do
+    # not move the fans here -- speed is set through WMI 0x2E / 0x27.
     "8D2C": ECRegisterMap(
         name="OMEN 45L GT22",
         board_id="8D2C",
+        fan_front=((0x124, 0x125), (0x126, 0x127), (0x128, 0x129),
+                   (0x12A, 0x12B)),
+        fan_labels=("Rear 1", "Rear 2", "Front 1", "Front 2", "Front 3",
+                    "Fan 6"),
+        fan_duty=(0x130, 0x131, 0x132, 0x133, 0x134, 0x135),
     ),
 }
 

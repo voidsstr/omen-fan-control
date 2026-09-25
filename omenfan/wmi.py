@@ -52,17 +52,21 @@ def wmi_call(cmdt, data=b'\x00\x00\x00\x00', wmi_path=r"\_SB.WMID.WMAA"):
 
 
 def wmi_fan_set(rear1, rear2, front1=None, front2=None, front3=None,
-                wmi_path=r"\_SB.WMID.WMAA"):
+                aux=None, wmi_path=r"\_SB.WMID.WMAA"):
     """Set fan speeds via WMI 0x2E.
 
-    2-byte payload: rear fans only.
-    6-byte payload: all 5 fans (required to enable front fan channels).
-    Values: 0x00=auto, 0xFF=max.
+    2-byte payload: rear fans only.  0x00 0x00 = back to BIOS auto.
+    6-byte payload: every fan channel (required to drive the front fans).
+
+    In the 6-byte form every byte must be non-zero.  On the OMEN 45L (8D2C)
+    a single 0x00 makes the firmware ignore the whole payload: with the 6th
+    byte left at 0x00 the channels stayed on their auto duty (~20%) and the
+    bottom front fan never spun up; filling it drove them all to 100%.
     """
     try:
         if front1 is not None:
             data = bytes([rear1, rear2, front1, front2 or front1,
-                          front3 or front1, 0x00])
+                          front3 or front1, aux or front1])
         else:
             data = bytes([rear1, rear2])
         buf = struct.pack('<IIII', WMI_SIGN, WMI_COMD, CMD_FAN_SET, len(data)) + data

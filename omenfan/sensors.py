@@ -129,6 +129,7 @@ class ECMetrics:
     rear_rpms: list = field(default_factory=list)
     front_rpms: list = field(default_factory=list)
     front_duty: list = field(default_factory=list)
+    fan_duty: list = field(default_factory=list)   # live duty, every channel
     perf_mode: int = 0
     auto_fan: int = 0
     heartbeat: int = 0
@@ -613,6 +614,7 @@ class SensorCollector:
         m.rear_rpms = [ec.read16_be(hi) for hi, lo in regmap.fan_rear]
         m.front_rpms = [ec.read16_be(hi) for hi, lo in regmap.fan_front]
         m.front_duty = [ec.read(r) for r in regmap.fan_front_duty]
+        m.fan_duty = [ec.read(r) for r in regmap.fan_duty]
         # Laptop: read fan speed percentages if available
         if regmap.fan_get_pct:
             m.front_duty = [ec.read(r) for r in regmap.fan_get_pct]
