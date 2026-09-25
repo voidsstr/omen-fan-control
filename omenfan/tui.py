@@ -14,11 +14,22 @@ from .fan import (FanController, FanCurve, PROFILE_NONE, PROFILE_MAX,
                   PROFILE_AGGRESSIVE, MAX_RPM, MAX_TEMP)
 from .sensors import SensorCollector
 from .detect import SystemCapabilities
+from .gameservers import GameServerMonitor
+from . import hoststate
 from . import wmi as wmi_mod
 
 
 # Standard bar layout: all panels (including fans) start bars at x + BAR_COL
 BAR_COL = 14
+
+
+def _trunc(text, width):
+    """Truncate to width, marking the cut with an ellipsis."""
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    return text[:width - 1] + "\u2026"
 
 
 class OmenFanTUI:
@@ -43,6 +54,18 @@ class OmenFanTUI:
         # Status bar
         self.status_msg = ""
         self.status_time = 0
+
+        # Game server monitor (polls on its own thread; empty on a machine
+        # that isn't hosting any)
+        self.games = GameServerMonitor()
+        self.view = "dash"        # "dash" | "games"
+        self.games_scroll = 0
+
+        # Fleet host status from retro-agent's login-screen collector, when
+        # this machine runs it (absent file = every host panel stays hidden)
+        self.host = hoststate.HostState()
+        self.host.refresh()
+        self.host_scroll = 0
 
         # Cached curves
         # Map standard perf_mode (0=Quiet, 1=Balanced, 3=Performance) to
@@ -69,6 +92,7 @@ class OmenFanTUI:
     def refresh_data(self):
         """Refresh all sensor data and fan keepalive."""
         self.sensors.refresh(ec=self.ec)
+        self.host.refresh()
         self.rtick += 1
 
         # Read EC-specific fan curves
@@ -81,10 +105,61 @@ class OmenFanTUI:
             self.fan.keepalive(self._get_cpu_temp())
 
     def handle_input(self, key):
+        # ESC backs out of a sub-view instead of quitting
+        if key == 27 and self.view != "dash":
+            self.view = "dash"
+            return
+
         if key in (ord('q'), ord('Q'), ord('0'), 27):
             if not self.monitor_only:
                 self.fan.cleanup()
             self.running = False
+            return
+
+        if key in (ord('g'), ord('G')):
+            if not self.games.active:
+                self.set_status("Scanning for game servers…"
+                                if not self.games.first_pass_done
+                                else "No game servers detected on this host")
+                return
+            self.view = "games" if self.view != "games" else "dash"
+            self.games_scroll = 0
+            return
+
+        if key in (ord('f'), ord('F')):
+            if not self.host.active:
+                self.set_status("No fleet host status — "
+                                f"{self.host.error or 'collector not running'}"
+                                f" ({self.host.path})")
+                return
+            self.view = "host" if self.view != "host" else "dash"
+            self.host_scroll = 0
+            return
+
+        if self.view == "host":
+            if key in (curses.KEY_DOWN, ord('j')):
+                self.host_scroll += 1
+            elif key in (curses.KEY_UP, ord('k')):
+                self.host_scroll = max(0, self.host_scroll - 1)
+            elif key == curses.KEY_NPAGE:
+                self.host_scroll += 10
+            elif key == curses.KEY_PPAGE:
+                self.host_scroll = max(0, self.host_scroll - 10)
+            elif key in (curses.KEY_HOME, ord('h')):
+                self.host_scroll = 0
+            return
+
+        if self.view == "games":
+            if key in (curses.KEY_DOWN, ord('j')):
+                self.games_scroll += 1
+            elif key in (curses.KEY_UP, ord('k')):
+                self.games_scroll = max(0, self.games_scroll - 1)
+            elif key == curses.KEY_NPAGE:
+                self.games_scroll += 10
+            elif key == curses.KEY_PPAGE:
+                self.games_scroll = max(0, self.games_scroll - 10)
+            elif key in (curses.KEY_HOME, ord('h')):
+                self.games_scroll = 0
             return
 
         if self.monitor_only:
@@ -191,18 +266,24 @@ class OmenFanTUI:
 
             row = self._draw_header(row, mx, fw)
 
-            # Choose layout
-            if fw >= 118:
-                row = self._draw_wide(row, mx, fw, h)
-            elif fw >= 78:
-                row = self._draw_medium(row, mx, fw, h)
+            if self.view == "games":
+                row = self._draw_games_page(row, mx, fw, h)
+            elif self.view == "host":
+                row = self._draw_host_page(row, mx, fw, h)
             else:
-                row = self._draw_narrow(row, mx, fw, h)
+                # Choose layout
+                if fw >= 118:
+                    row = self._draw_wide(row, mx, fw, h)
+                elif fw >= 78:
+                    row = self._draw_medium(row, mx, fw, h)
+                else:
+                    row = self._draw_narrow(row, mx, fw, h)
+
+                if not self.monitor_only:
+                    row = self._draw_curves(row, mx, fw, h)
 
             # Controls + status (shared)
-            if not self.monitor_only:
-                row = self._draw_curves(row, mx, fw, h)
-                row = self._draw_controls(row, mx, fw, h)
+            row = self._draw_controls(row, mx, fw, h)
             row = self._draw_status(row, mx, fw, h)
 
             self.scr.refresh()
@@ -255,6 +336,8 @@ class OmenFanTUI:
             info_parts.append((" \u00b7 ", C_DIM))
             info_parts.append((prof, prof_col))
 
+        info_parts.append((" \u00b7 ", C_DIM))
+        info_parts.append((time.strftime("%a %d %b %H:%M"), C_TITLE))
         info_parts.append(("  ", C_DIM))
         info_parts.append((spin, C_TITLE))
 
@@ -293,6 +376,35 @@ class OmenFanTUI:
         if cpu and cpu.proc_total > 0:
             sub_parts.append((f"{cpu.proc_total} procs", C_DIM))
 
+        if self.games.active:
+            up, total, players, bots = self.games.totals()
+            sub_parts.append((f"▸ {up}/{total} srv",
+                              C_ACTIVE if up == total else C_WARN))
+            if players:
+                humans = players - bots
+                if bots and humans:
+                    lbl = f"{humans} plr + {bots} bot"
+                elif bots:
+                    lbl = f"{bots} bot"
+                else:
+                    lbl = f"{humans} plr"
+                sub_parts.append((lbl, C_TITLE))
+
+        if self.host.active:
+            fl = self.host.section("fleet")
+            if fl.get("total"):
+                sub_parts.append((f"fleet {fl.get('up', 0)}/{fl['total']}",
+                                  C_ACTIVE if fl.get("up") else C_DIM))
+            sv = self.host.section("services")
+            if sv.get("total"):
+                ok = sv.get("up") == sv.get("total")
+                sub_parts.append((f"svc {sv.get('up', 0)}/{sv['total']}",
+                                  C_ACTIVE if ok else C_ALERT))
+            if self.host.stale():
+                sub_parts.append((f"host data stale "
+                                  f"{hoststate.age(self.host.age_sec())}",
+                                  C_ALERT))
+
         if ec:
             sub_parts.append((f"HB:{ec.heartbeat:3d}", C_DIM))
 
@@ -323,6 +435,7 @@ class OmenFanTUI:
         row_l = row
         row_l = self._draw_cpu_panel(row_l, lx, col_w, max_h)
         row_l = self._draw_net_panel(row_l, lx, col_w, max_h)
+        row_l = self._draw_gameservers_panel(row_l, lx, col_w, max_h)
 
         # Center column: Fans + Temperatures
         row_c = row
@@ -335,6 +448,7 @@ class OmenFanTUI:
         row_r = self._draw_mem_panel(row_r, rx, rw, max_h)
         row_r = self._draw_disk_panel(row_r, rx, rw, max_h)
         row_r = self._draw_battery_panel(row_r, rx, rw, max_h)
+        row_c = self._draw_host_summary_panel(row_c, cx, col_w, max_h)
 
         return max(row_l, row_c, row_r)
 
@@ -351,6 +465,7 @@ class OmenFanTUI:
         row_l = self._draw_cpu_panel(row_l, lx, lw, max_h)
         row_l = self._draw_temps_panel(row_l, lx, lw, max_h)
         row_l = self._draw_net_panel(row_l, lx, lw, max_h)
+        row_l = self._draw_gameservers_panel(row_l, lx, lw, max_h)
 
         row_r = row
         row_r = self._draw_fans_panel(row_r, rx, rw, max_h)
@@ -358,6 +473,7 @@ class OmenFanTUI:
         row_r = self._draw_mem_panel(row_r, rx, rw, max_h)
         row_r = self._draw_disk_panel(row_r, rx, rw, max_h)
         row_r = self._draw_battery_panel(row_r, rx, rw, max_h)
+        row_r = self._draw_host_summary_panel(row_r, rx, rw, max_h)
 
         return max(row_l, row_r)
 
@@ -373,6 +489,8 @@ class OmenFanTUI:
         row = self._draw_net_panel(row, mx, fw, max_h)
         row = self._draw_disk_panel(row, mx, fw, max_h)
         row = self._draw_battery_panel(row, mx, fw, max_h)
+        row = self._draw_gameservers_panel(row, mx, fw, max_h)
+        row = self._draw_host_summary_panel(row, mx, fw, max_h)
         return row
 
     # ── Individual panels ────────────────────────────────────────
@@ -832,6 +950,336 @@ class OmenFanTUI:
 
         return row + ph
 
+    def _draw_gameservers_panel(self, row, x, w, max_h):
+        """Compact fleet summary — one line per hosted game server."""
+        snap = self.games.snapshot()
+        if not snap:
+            return row
+
+        avail = (max_h - 4) - row
+        # box borders (2) + summary line (1)
+        content_max = avail - 3
+        if content_max < 1 or w < 30:
+            return row
+
+        shown = snap
+        truncated = 0
+        if len(snap) > content_max:
+            shown = snap[:content_max - 1]
+            truncated = len(snap) - len(shown)
+
+        ph = len(shown) + 3 + (1 if truncated else 0)
+        _box(self.scr, row, x, ph, w, "Game Servers")
+
+        up, total, players, bots = self.games.totals()
+        sy = row + 1
+        _s(self.scr, sy, x + 2, f"{up}/{total} up",
+           curses.color_pair(C_ACTIVE if up == total else C_WARN)
+           | curses.A_BOLD)
+        detail = f"{players} playing" if players else "empty"
+        if bots:
+            detail += f" ({bots} bot)"
+        ux = x + 2 + len(f"{up}/{total} up")
+        _s(self.scr, sy, ux, " · ", curses.color_pair(C_DIM))
+        _s(self.scr, sy, ux + 3, detail,
+           curses.color_pair(C_TITLE if players else C_DIM))
+
+        cnt_w = 7
+        name_w = max(8, min(18, (w - 6 - cnt_w) // 2))
+        map_w = max(4, w - 4 - name_w - cnt_w - 1)
+
+        for i, (sd, st) in enumerate(shown):
+            gy = row + 2 + i
+            dot_col = C_ACTIVE if st.up else C_ALERT
+            _s(self.scr, gy, x + 2, "●", curses.color_pair(dot_col))
+            _s(self.scr, gy, x + 4, f"{_trunc(sd.label, name_w):<{name_w}}",
+               curses.color_pair(C_DIM))
+            mx_ = x + 4 + name_w + 1
+            if st.up:
+                _s(self.scr, gy, mx_, f"{_trunc(st.map, map_w):<{map_w}}",
+                   curses.color_pair(C_SPARK))
+                cnt = f"{st.players}/{st.max_players}"
+                pc = C_ACTIVE if st.players else C_DIM
+                _s(self.scr, gy, x + w - len(cnt) - 2, cnt,
+                   curses.color_pair(pc) | (curses.A_BOLD if st.players else 0))
+            else:
+                _s(self.scr, gy, mx_, (st.error or "down")[:map_w],
+                   curses.color_pair(C_ALERT))
+
+        if truncated:
+            _s(self.scr, row + 2 + len(shown), x + 4,
+               f"+{truncated} more — press g",
+               curses.color_pair(C_DIM) | curses.A_DIM)
+
+        return row + ph
+
+    # ── Full-screen game server view (key: g) ────────────────────
+
+    def _games_render_items(self, snap):
+        """Flatten the fleet into scrollable render rows."""
+        items = []
+        for sd, st in snap:
+            items.append(("srv", sd, st, None))
+            if not st.up:
+                continue
+            if st.player_list:
+                items.append(("hdr", sd, st, None))
+                for p in st.player_list:
+                    items.append(("plr", sd, st, p))
+            elif not st.players_known and st.players:
+                # Tribes 2 reports a population but never a roster
+                items.append(("note", sd, st,
+                              f"{st.players} connected — this engine "
+                              "reports no player list"))
+        return items
+
+    def _draw_games_page(self, row, mx, fw, max_h):
+        """Full-screen live view of every hosted server and its players."""
+        snap = self.games.snapshot()
+        body_h = (max_h - 2) - row
+        if body_h < 4:
+            return row
+
+        if not snap:
+            msg = ("scanning for game servers…"
+                   if not self.games.first_pass_done
+                   else "no game servers responding on this host")
+            _box(self.scr, row, mx, 3, fw, "Game Servers")
+            _s(self.scr, row + 1, mx + 2, msg,
+               curses.color_pair(C_DIM) | curses.A_DIM)
+            return row + 3
+
+        up, total, players, bots = self.games.totals()
+        title = f"Game Servers — {up}/{total} up · {players} playing"
+        if bots:
+            title += f" ({players - bots} human · {bots} bot)"
+
+        items = self._games_render_items(snap)
+        inner = body_h - 2
+        max_scroll = max(0, len(items) - inner)
+        self.games_scroll = min(self.games_scroll, max_scroll)
+        window = items[self.games_scroll:self.games_scroll + inner]
+
+        _box(self.scr, row, mx, body_h, fw, title)
+
+        # Column geometry, scaled to terminal width. Widest first to drop:
+        # the advertised hostname, then the mod/mode pair.
+        lbl_w = 17 if fw >= 100 else 14
+        host_w = 30 if fw >= 130 else (22 if fw >= 116 else 0)
+        mode_w = 24 if fw >= 96 else (18 if fw >= 86 else 0)
+        map_w = 16 if fw >= 80 else 12
+        cols = (lbl_w, host_w, mode_w, map_w)
+
+        for i, item in enumerate(window):
+            y = row + 1 + i
+            kind, sd, st, extra = item
+            if kind == "srv":
+                self._draw_games_server_row(y, mx, fw, sd, st, cols)
+            elif kind == "hdr":
+                _s(self.scr, y, mx + 6,
+                   f"{'player':<24}{'score':>6}  {'ping':>5}  {'time':>7}",
+                   curses.color_pair(C_DIM) | curses.A_DIM)
+            elif kind == "plr":
+                self._draw_games_player_row(y, mx, fw, extra)
+            elif kind == "note":
+                _s(self.scr, y, mx + 6, str(extra),
+                   curses.color_pair(C_DIM) | curses.A_DIM)
+
+        if max_scroll:
+            hint = f" {self.games_scroll + 1}-{self.games_scroll + len(window)}/{len(items)} ↑↓ "
+            _s(self.scr, row + body_h - 1, mx + fw - len(hint) - 3, hint,
+               curses.color_pair(C_DIM))
+
+        return row + body_h
+
+    def _draw_games_server_row(self, y, mx, fw, sd, st, cols):
+        """One server headline: identity, mod/mode, map, population, port."""
+        lbl_w, host_w, mode_w, map_w = cols
+        dot_col = C_ACTIVE if st.up else C_ALERT
+        _s(self.scr, y, mx + 2, "●", curses.color_pair(dot_col))
+
+        # The unit label, not the engine's game string: it is what tells the
+        # two CS 1.6 servers (vanilla vs no-blood) apart.
+        _s(self.scr, y, mx + 4, f"{_trunc(sd.label, lbl_w):<{lbl_w}}",
+           curses.color_pair(C_TITLE) | curses.A_BOLD)
+        cx = mx + 4 + lbl_w + 1
+
+        if not st.up:
+            msg = st.error or "not responding"
+            if st.last_ok:
+                msg += f" — last seen {format_duration(time.time() - st.last_ok)} ago"
+            _s(self.scr, y, cx, msg[:fw - (cx - mx) - 2],
+               curses.color_pair(C_ALERT))
+            return
+
+        if host_w:
+            # Hostname as advertised to the server browser
+            _s(self.scr, y, cx, f"{_trunc(st.name, host_w):<{host_w}}",
+               curses.color_pair(C_DIM))
+            cx += host_w + 1
+
+        if mode_w:
+            # A2S carries no game mode, so the game description fills that slot
+            bits = [b for b in (st.mod, st.mode or st.game) if b]
+            _s(self.scr, y, cx, f"{_trunc(' · '.join(bits), mode_w):<{mode_w}}",
+               curses.color_pair(C_DIM))
+            cx += mode_w + 1
+
+        _s(self.scr, y, cx, f"{st.map[:map_w]:<{map_w}}",
+           curses.color_pair(C_SPARK))
+        cx += map_w + 1
+
+        cnt = f"{st.players}/{st.max_players}"
+        pc = C_ACTIVE if st.players else C_DIM
+        _s(self.scr, y, cx, f"{cnt:>6}",
+           curses.color_pair(pc) | (curses.A_BOLD if st.players else 0))
+        cx += 7
+
+        # Population bar — how full the server is
+        bar_w = 8
+        if st.max_players and cx + bar_w < mx + fw - 22:
+            _bar(self.scr, y, cx, bar_w, st.players / st.max_players, 'fan')
+            cx += bar_w + 1
+
+        # Right side: connect port, proxy health, query latency
+        tail = f":{sd.game_port or sd.port}"
+        if sd.proxy_port:
+            tail += f" →{sd.proxy_port}" if sd.proxy_up else f" ✗{sd.proxy_port}"
+        tail += f"  {st.rtt_ms:4.0f}ms"
+        tx = mx + fw - len(tail) - 2
+        if tx > cx:
+            col = C_DIM if (not sd.proxy_port or sd.proxy_up) else C_WARN
+            _s(self.scr, y, tx, tail, curses.color_pair(col))
+
+    def _draw_games_player_row(self, y, mx, fw, p):
+        """One connected player: name, score, ping, connected time."""
+        name = p.name if p.name else "(unnamed)"
+        _s(self.scr, y, mx + 6, f"{_trunc(name, 24):<24}",
+           curses.color_pair(C_ACTIVE))
+
+        _s(self.scr, y, mx + 30, f"{p.score:>6}",
+           curses.color_pair(C_TITLE) | curses.A_BOLD)
+
+        # A protocol that does not carry the field reports -1 — show that
+        # honestly rather than printing a zero the server never sent.
+        if p.ping < 0:
+            ping_s, pcol = "  —", C_DIM
+        elif p.ping == 0:
+            ping_s, pcol = "  bot", C_DIM
+        else:
+            ping_s = f"{p.ping:>3}ms"
+            pcol = C_COOL if p.ping < 60 else C_WARM if p.ping < 150 else C_HOT
+        _s(self.scr, y, mx + 38, f"{ping_s:>5}", curses.color_pair(pcol))
+
+        time_s = format_duration(p.time_s) if p.time_s >= 0 else "—"
+        _s(self.scr, y, mx + 45, f"{time_s:>7}", curses.color_pair(C_DIM))
+
+        if p.team:
+            _s(self.scr, y, mx + 54, p.team[:12], curses.color_pair(C_SPARK))
+
+    # ── Fleet host status (retro-agent login-screen collector) ───
+
+    _SEG_FLAGS = {"": 0, "b": curses.A_BOLD, "d": curses.A_DIM}
+
+    def _draw_segments(self, y, x, width, segs):
+        """Draw a row of (text, colour, flags) segments, clipped to width."""
+        cx, end = x, x + width
+        for text, col, flags in segs:
+            if not text:
+                continue
+            room = end - cx
+            if room <= 0:
+                break
+            if len(text) > room:
+                text = _trunc(text, room)
+            _s(self.scr, y, cx, text,
+               curses.color_pair(col) | self._SEG_FLAGS.get(flags, 0))
+            cx += len(text)
+
+    def _host_title_suffix(self):
+        if self.host.stale():
+            return f" · stale {hoststate.age(self.host.age_sec())}"
+        return ""
+
+    def _draw_host_summary_panel(self, row, x, w, max_h):
+        """Compact fleet-host summary — one line per login-wall section."""
+        if not self.host.active or w < 30:
+            return row
+        rows = hoststate.summary(self.host)
+        if not rows:
+            return row
+        avail = (max_h - 4) - row
+        if avail < 4:
+            return row
+        shown = rows[:avail - 2]
+        ph = len(shown) + 2
+        _box(self.scr, row, x, ph, w,
+             "Fleet Host" + self._host_title_suffix())
+        for i, segs in enumerate(shown):
+            self._draw_segments(row + 1 + i, x + 2, w - 4, segs)
+        if len(shown) < len(rows) or w >= 44:
+            hint = " f: details "
+            _s(self.scr, row + ph - 1, x + w - len(hint) - 2, hint,
+               curses.color_pair(C_DIM) | curses.A_DIM)
+        return row + ph
+
+    def _draw_host_page(self, row, mx, fw, max_h):
+        """Full-screen view of every panel on the fleet login wall."""
+        body_h = (max_h - 2) - row
+        if body_h < 4:
+            return row
+        panels = hoststate.build_all(self.host)
+        if not panels:
+            _box(self.scr, row, mx, 3, fw, "Fleet Host")
+            _s(self.scr, row + 1, mx + 2,
+               self.host.error or "no host status published",
+               curses.color_pair(C_DIM) | curses.A_DIM)
+            return row + 3
+
+        # Masonry: each panel drops into the currently shortest column, so a
+        # tall panel (fleet, watchdog) does not leave a hole beside it.
+        ncols = max(1, min(3, fw // 62))
+        col_w = fw // ncols
+        heights = [0] * ncols
+        placed = []
+        for title, rows in panels:
+            c = heights.index(min(heights))
+            placed.append((c, heights[c], title, rows))
+            heights[c] += len(rows) + 2
+
+        total = max(heights)
+        max_scroll = max(0, total - body_h)
+        self.host_scroll = min(self.host_scroll, max_scroll)
+        off = self.host_scroll
+        top, bottom = row, row + body_h
+
+        b = curses.color_pair(C_BORDER)
+        for c, vy, title, rows in placed:
+            x = mx + c * col_w
+            w = col_w if c < ncols - 1 else fw - c * col_w
+            ph = len(rows) + 2
+            for i in range(ph):
+                y = row + vy + i - off
+                if y < top or y >= bottom:
+                    continue
+                if i == 0:
+                    _s(self.scr, y, x, "\u256d" + "\u2500" * (w - 2) + "\u256e", b)
+                    if title:
+                        _s(self.scr, y, x + 2, f" {_trunc(title, w - 6)} ",
+                           curses.color_pair(C_TITLE) | curses.A_BOLD)
+                elif i == ph - 1:
+                    _s(self.scr, y, x, "\u2570" + "\u2500" * (w - 2) + "\u256f", b)
+                else:
+                    _s(self.scr, y, x, "\u2502", b)
+                    _s(self.scr, y, x + w - 1, "\u2502", b)
+                    self._draw_segments(y, x + 2, w - 4, rows[i - 1])
+
+        if max_scroll:
+            hint = f" {off + 1}-{min(total, off + body_h)}/{total} \u2191\u2193 "
+            _s(self.scr, bottom - 1, mx + fw - len(hint) - 3, hint,
+               curses.color_pair(C_DIM))
+        return bottom
+
     def _draw_placeholder(self, row, x, w, title, msg):
         """Draw a minimal placeholder panel for unavailable data."""
         _box(self.scr, row, x, 3, w, title)
@@ -904,11 +1352,20 @@ class OmenFanTUI:
         cx = x + 1
         has_wmi = self.fan._has_wmi
         items = []
-        if has_wmi:
-            items += [("1", "Bal"), ("2", "Qt"), ("3", "Perf")]
-        items += [("4", "Max"), ("5", "Aggro")]
-        if self._curves:
-            items += [("6", "Edit"), ("7", "-"), ("8", "+")]
+        if self.view == "games":
+            items += [("↑↓", "Scroll"), ("g", "Dashboard")]
+        elif self.view == "host":
+            items += [("↑↓", "Scroll"), ("f", "Dashboard")]
+        elif not self.monitor_only:
+            if has_wmi:
+                items += [("1", "Bal"), ("2", "Qt"), ("3", "Perf")]
+            items += [("4", "Max"), ("5", "Aggro")]
+            if self._curves:
+                items += [("6", "Edit"), ("7", "-"), ("8", "+")]
+        if self.games.active and self.view != "games":
+            items.append(("g", "Servers"))
+        if self.host.active and self.view != "host":
+            items.append(("f", "Fleet"))
         items.append(("q", "Quit"))
         for key, desc in items:
             _s(self.scr, row, cx, key,
@@ -948,6 +1405,7 @@ class OmenFanTUI:
         self.scr.timeout(100)   # 10fps for smooth animation
         curses.curs_set(0)
         init_colors()
+        self.games.start()
 
         last_read = 0
         while self.running:
@@ -964,3 +1422,5 @@ class OmenFanTUI:
                     if k2 == -1:
                         break
                     self.handle_input(k2)
+
+        self.games.stop()

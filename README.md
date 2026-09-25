@@ -57,6 +57,8 @@ Full fan curve editing, performance mode switching, and direct EC register acces
 - **Adaptive layout** — Three-column (120+), two-column (80+), or stacked (50+) based on terminal width.
 - **Safe defaults** — Minimum 25% PWM floor prevents fan stall. Original fan modes saved and restored on exit (including SIGTERM/SIGINT).
 - **Graceful degradation** — Runs as system monitor without root. Each sensor independently try/excepted.
+- **Game server monitoring** — Auto-detects game servers hosted on the machine and live-updates player counts, map, mod/game mode and the full roster with score and ping. See [Game Servers](#game-servers).
+- **Fleet host status** — On a retro-agent host, shows everything the login-screen status wall shows: fleet boxes, services, PXE, remote sessions, AI agents, the favourites agent, the game-server watchdog and web sites. See [Fleet Host](#fleet-host).
 - **Zero dependencies** — Pure Python 3.8+ stdlib. No pip packages.
 
 ## Usage
@@ -84,7 +86,107 @@ Options:
 | `6` | Enter/exit fan curve editor | HP OMEN (EC curves) |
 | `7` / `8` | All curve points -/+100 RPM | HP OMEN (EC curves) |
 | Arrow keys | Navigate/adjust curve points | Edit mode |
+| `g` | Game server view (in/out) | Hosted game servers detected |
+| `f` | Fleet host view (in/out) | retro-agent dashboard collector running |
 | `q` / `Esc` | Quit (restores fans) | |
+
+## Game Servers
+
+If the machine is hosting game servers, omenfan finds them and shows live
+status alongside the hardware panels — a compact fleet summary on the
+dashboard, and a full view with every connected player on `g`.
+
+```
+╭─ Game Servers — 10/10 up · 12 playing (8 human · 4 bot) ─────────────────────────╮
+│ ● CS 1.6          NSC Retro Fleet Arena (CS 1.6)  cstrike · Counter-Strike  ...  │
+│     player                   score   ping     time                               │
+│     hazard                      14   28ms     6m                                 │
+│ ● Quake III Arena NSC Retro Fleet Arena (Q3A)     baseq3 · Free For All     ...  │
+```
+
+Per server: advertised hostname, mod/gamedir, game mode, current map,
+population with a fill bar, connect port, and query latency. Per player:
+name, score, ping and connected time — whichever of those the engine
+actually reports.
+
+### Discovery
+
+Servers are found by reading the kernel's UDP socket table
+(`/proc/net/udp`), so the panel only appears on a machine that is really
+hosting them, and each server is probed **at the address it actually bound**
+— a server bound to one LAN IP rather than `0.0.0.0` would time out if
+probed on loopback. Only ports that answer their engine's query become rows.
+
+Polling runs on a background thread every 5s; the render path never blocks
+on a UDP timeout.
+
+### Supported engines
+
+| Engine | Games | Query |
+|--------|-------|-------|
+| GoldSrc / Source | Half-Life, CS 1.6, The Specialists | `A2S_INFO` + `A2S_PLAYER` (with challenge) |
+| Quake III | Quake III Arena, OpenArena | `getstatus` |
+| Quake II | Quake 2 | `status` |
+| QuakeWorld | mvdsv | `status` |
+| GameSpy | UT99, UT2004 | `\status\` + `\players\` on game port + 1 |
+| Torque | Tribes 2 | binary info request |
+
+Each family needs its own query — probing everything with Quake's
+`getstatus` reports Quake 2, UT and Tribes 2 as falsely down. Two protocol
+notes worth knowing: modern GoldSrc gates queries behind an anti-reflection
+challenge that must be echoed back, and Tribes 2 only answers in plaintext
+when bit `0x02` is set in the request flags.
+
+Not every protocol carries every field. A2S reports score and connect time
+but no ping; Tribes 2 reports a population but no roster at all. Those show
+as `—` rather than a fabricated zero.
+
+### Custom fleets
+
+To override discovery — non-standard ports, or servers on another box —
+create `~/.config/omenfan/gameservers.json`:
+
+```json
+[
+  {"label": "CS 1.6", "engine": "a2s", "port": 27018, "host": "127.0.0.1",
+   "unit": "cs16-server", "proxy_port": 27015},
+  {"label": "UT99", "engine": "gamespy", "port": 7798, "game_port": 7797}
+]
+```
+
+`engine` is one of `a2s`, `q3`, `q2`, `qw`, `gamespy`, `torque`.
+
+## Fleet Host
+
+On a machine running [retro-agent](https://github.com/voidsstr/retro-agent)'s
+login-screen dashboard (`retro-dashboard-collector`), omenfan shows the same
+status the GDM wall does. The dashboard gets a compact **Fleet Host** panel
+with one line per section, the header gets `fleet N/M · svc N/M` and a clock,
+and `f` opens a full view with every panel:
+
+| Panel | Shows |
+|-------|-------|
+| Fleet | every retro box: up/offline, reported hostname, OS, RTT, IP |
+| Services | the fleet's systemd units (user + system), state, uptime, restarts |
+| Server Watchdog | units down and why, restarts this hour, slow starts, browser proxies, recent restart actions |
+| PXE | bound sockets (proxyDHCP/TFTP/BINL), boot holds, last client, last file served |
+| Favourites Agent | last/next pass, boxes reached, favourites written, live servers by engine |
+| Agents | chat daemon + brain health, queue depth, AI runs in flight, last log line |
+| Remote | Chrome Remote Desktop, RDP, console occupancy, login sessions |
+| Web Sites | per-site agent health, articles published in 7 days, deploys (when the collector publishes them) |
+
+Nothing is gathered by omenfan itself — it reads the collector's published
+state file (`/run/retro-dashboard/state.json`, override with
+`$OMENFAN_HOST_STATE`) at most every 2s. The collector already does the
+network sweeps and `systemctl` queries on its own cadence, and running them
+from the render loop would stall the screen. Without the collector the file
+is absent and none of this appears.
+
+Statuses use the wall's vocabulary, so a glyph means the same thing in both
+places: `●` ok, `◐` running, `○` off on purpose, `·` never installed, `?`
+unknown, `⋯` stale, `▲` warn, `‖` blocked, `✕` failed. Only the last three
+are faults — a powered-down fleet box is `○`, not red. When the collector's
+sample is more than 15s old the header says `host data stale`.
 
 ### Auto-detection
 
@@ -106,6 +208,8 @@ omenfan/
 ├── wmi.py          # HP OMEN WMI BIOS interface (acpi_call)
 ├── sensors.py      # System metrics (CPU, mem, disk, net, GPU, thermal)
 ├── fan.py          # Fan controller (EC + WMI + hwmon backends)
+├── gameservers.py  # Live game server queries (A2S, Quake, GameSpy, Torque)
+├── hoststate.py    # Fleet host panels from retro-agent's dashboard collector
 ├── tui.py          # TUI rendering and input
 ├── widgets.py      # Braille bars, sparklines, fan icons
 └── theme.py        # Color scheme
