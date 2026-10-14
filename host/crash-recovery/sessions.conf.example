@@ -1,0 +1,5 @@
+# Claude sessions reopened (and continued) at every login by ~/.local/bin/crash-recovery-sessions.sh
+# Copy to ~/.config/crash-recovery/sessions.conf.
+# One per line: <full session uuid> | <cwd> | <tab title>.  Blank lines and # comments ignored.
+# The uuid must be the full one; a short prefix makes `claude --resume` open the picker instead.
+00000000-0000-0000-0000-000000000000 | /home/you/development/some-repo | Example session

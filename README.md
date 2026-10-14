@@ -188,6 +188,28 @@ unknown, `⋯` stale, `▲` warn, `‖` blocked, `✕` failed. Only the last thr
 are faults — a powered-down fleet box is `○`, not red. When the collector's
 sample is more than 15s old the header says `host data stale`.
 
+## Crash Recovery
+
+`host/crash-recovery/` reopens a pinned list of Claude Code sessions after the
+host reboots or crashes, all as tabs in one Ptyxis window, and tells each one
+to check the state of its work and continue. It runs at login, so pair it with
+GDM autologin.
+
+```bash
+install -m 755 host/crash-recovery/crash-recovery-sessions.sh ~/.local/bin/
+install -m 644 host/crash-recovery/crash-recovery-sessions.desktop ~/.config/autostart/
+mkdir -p ~/.config/crash-recovery
+cp host/crash-recovery/sessions.conf.example ~/.config/crash-recovery/sessions.conf
+```
+
+Edit `sessions.conf` to choose which sessions come back (`uuid | cwd | title`,
+full UUIDs only). Sessions already running are skipped, and so is any whose
+`cwd` no longer exists. A transcript whose last line was cut off by the power
+loss is trimmed first, and the cut bytes are kept as
+`<uuid>.jsonl.precrash-<timestamp>`. After 4 or more boots in an hour the
+sessions reopen without the continue prompt. `--dry-run` prints the commands,
+and the log is `~/.local/state/crash-recovery-sessions.log`.
+
 ### Auto-detection
 
 - **Not root** — Monitor-only mode. All sysfs/proc sensors work.

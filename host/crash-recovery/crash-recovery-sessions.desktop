@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Crash recovery: reopen Claude sessions
+Comment=Reopen and continue the sessions in ~/.config/crash-recovery/sessions.conf
+Exec=/bin/bash -lc "sleep 25; exec ~/.local/bin/crash-recovery-sessions.sh"
+Terminal=false
+X-GNOME-Autostart-enabled=true
