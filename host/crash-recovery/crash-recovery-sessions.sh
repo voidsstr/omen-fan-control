@@ -25,6 +25,17 @@ if [ "${recent:-0}" -ge 4 ]; then
   send_prompt=0
 fi
 
+ptyxis_windows() {
+  gdbus introspect --session --dest org.gnome.Ptyxis --object-path /org/gnome/Ptyxis/window -r 2>/dev/null \
+    | grep -c 'node /org/gnome/Ptyxis/window/'
+}
+# Ptyxis's own session restore reopens the last saved window (a plain shell tab) when the
+# launcher starts it, and that window competes with ours for the --tab calls (2026-11-10).
+# This launcher is the restore mechanism, so switch Ptyxis's off.
+if [ $dry = 0 ] && [ "$(gsettings get org.gnome.Ptyxis restore-session 2>/dev/null)" = true ]; then
+  gsettings set org.gnome.Ptyxis restore-session false && echo "ptyxis restore-session -> false"
+fi
+
 first=1
 while IFS='|' read -r sid cwd title; do
   sid=$(echo "$sid" | xargs); cwd=$(echo "$cwd" | xargs); title=$(echo "$title" | xargs)
@@ -68,7 +79,16 @@ PY
     # built a second window (2026-09-29 13:19 boot).
     for i in $(seq 180); do pgrep -f "^claude --resume $sid" >/dev/null && break; sleep 1; done
     pgrep -f "^claude --resume $sid" >/dev/null && echo "  running after ${i}s" || echo "  WARN not running after 180s"
-    sleep 3
+    if [ $first = 1 ]; then
+      # A running claude doesn't mean the window has focus yet; --tab with no active window
+      # makes a new one (2026-11-10 boot ended up with 2 windows). Wait for the window
+      # object, then give the shell a moment to focus it.
+      for j in $(seq 60); do [ "$(ptyxis_windows)" -ge 1 ] && break; sleep 1; done
+      sleep 8
+    else
+      sleep 3
+    fi
   fi
   first=0
 done < "$conf"
+[ $dry = 0 ] && { w=$(ptyxis_windows); echo "ptyxis windows: $w"; [ "$w" -gt 1 ] && echo "  WARN tabs split across $w windows"; }
