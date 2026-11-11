@@ -70,10 +70,12 @@ PY
   # *active* window, so wait until each tab's claude is actually running before adding the
   # next -- under boot load a window can take a minute to appear, and firing blind scattered
   # the tabs across windows (2026-09-29).
-  mode=--tab; [ $first = 1 ] && mode=--new-window
-  cmd=(ptyxis "$mode" -T "claude: $title" -d "$cwd" -- bash -lc "$inner")
+  # --maximize: the remembered window-size (190x56) is taller than the 1600x1200 screen, which
+  # left the tab bar out of view so the tabs looked missing (2026-11-11).
+  mode=(--tab); [ $first = 1 ] && mode=(--new-window --maximize)
+  cmd=(ptyxis "${mode[@]}" -T "claude: $title" -d "$cwd" -- bash -lc "$inner")
   if [ $dry = 1 ]; then printf '%q ' "${cmd[@]}"; echo; else
-    echo "open ($mode): $sid ($title)"; setsid "${cmd[@]}" >/dev/null 2>&1 < /dev/null &
+    echo "open (${mode[*]}): $sid ($title)"; setsid "${cmd[@]}" >/dev/null 2>&1 < /dev/null &
     # Anchor on ^claude: the unanchored pattern also matched this ptyxis launcher's own
     # command line, so the wait passed before the window existed and the --tab calls
     # built a second window (2026-09-29 13:19 boot).
