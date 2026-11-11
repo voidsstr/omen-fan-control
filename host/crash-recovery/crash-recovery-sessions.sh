@@ -10,6 +10,10 @@ log="$HOME/.local/state/crash-recovery-sessions.log"
 dry=0; send_prompt=1
 for a in "$@"; do case "$a" in --dry-run) dry=1 ;; --no-prompt) send_prompt=0 ;; esac; done
 [ $dry = 1 ] || exec >>"$log" 2>&1
+# Drop any Claude Code session variables inherited from a parent claude (e.g. when this is run
+# from inside a session). The first ptyxis call becomes the primary, its environment reaches
+# every tab, and CLAUDE_CODE_CHILD_SESSION there turns transcript saving off (2026-11-11).
+for v in $(compgen -e | grep -E '^CLAUDE'); do unset "$v"; done
 echo "=== $(date '+%F %T') boot $(cat /proc/sys/kernel/random/boot_id)"
 
 prompt="The host (OMEN, .132) just rebooted or crashed and this session was resumed automatically. Before redoing anything, check the actual state of whatever you were in the middle of (processes, files, remote boxes), then continue the task where you left off."
@@ -36,6 +40,22 @@ if [ $dry = 0 ] && [ "$(gsettings get org.gnome.Ptyxis restore-session 2>/dev/nu
   gsettings set org.gnome.Ptyxis restore-session false && echo "ptyxis restore-session -> false"
 fi
 
+agent_kids() { for a in $(pgrep -f '^/usr/libexec/ptyxis-agent'); do pgrep -P "$a"; done | sort; }
+# Open a plain window first and add every session as a --tab. A window created with a command
+# (ptyxis --new-window -- claude ...) is a single-terminal window: Ptyxis hides its tab bar,
+# "+" and overview buttons, so the session tabs were there but invisible (2026-11-11).
+# --maximize: the remembered window-size can be taller than the 1600x1200 screen.
+starter=""
+if [ $dry = 0 ]; then
+  before=$(agent_kids)
+  setsid ptyxis --new-window --maximize -T "claude sessions" -d "$HOME" >/dev/null 2>&1 < /dev/null &
+  for j in $(seq 120); do
+    starter=$(comm -13 <(echo "$before") <(agent_kids) | head -1)
+    [ -n "$starter" ] && [ "$(ptyxis_windows)" -ge 1 ] && break; sleep 1
+  done
+  echo "window: starter tab pid ${starter:-?} after ${j}s, windows $(ptyxis_windows)"
+  sleep 8   # let the shell focus it; --tab goes to the *active* window
+fi
 first=1
 while IFS='|' read -r sid cwd title; do
   sid=$(echo "$sid" | xargs); cwd=$(echo "$cwd" | xargs); title=$(echo "$title" | xargs)
@@ -66,13 +86,11 @@ PY
   inner="CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 claude --resume $sid --dangerously-skip-permissions"
   [ $send_prompt = 1 ] && inner+=" $(printf '%q' "$prompt")"
   inner+='; exec ${SHELL:-bash}'
-  # The first session gets a fresh window; the rest go in as tabs. ptyxis --tab targets the
+  # Every session goes in as a tab of the starter window. ptyxis --tab targets the
   # *active* window, so wait until each tab's claude is actually running before adding the
   # next -- under boot load a window can take a minute to appear, and firing blind scattered
   # the tabs across windows (2026-09-29).
-  # --maximize: the remembered window-size (190x56) is taller than the 1600x1200 screen, which
-  # left the tab bar out of view so the tabs looked missing (2026-11-11).
-  mode=(--tab); [ $first = 1 ] && mode=(--new-window --maximize)
+  mode=(--tab)
   cmd=(ptyxis "${mode[@]}" -T "claude: $title" -d "$cwd" -- bash -lc "$inner")
   if [ $dry = 1 ]; then printf '%q ' "${cmd[@]}"; echo; else
     echo "open (${mode[*]}): $sid ($title)"; setsid "${cmd[@]}" >/dev/null 2>&1 < /dev/null &
@@ -81,16 +99,10 @@ PY
     # built a second window (2026-09-29 13:19 boot).
     for i in $(seq 180); do pgrep -f "^claude --resume $sid" >/dev/null && break; sleep 1; done
     pgrep -f "^claude --resume $sid" >/dev/null && echo "  running after ${i}s" || echo "  WARN not running after 180s"
-    if [ $first = 1 ]; then
-      # A running claude doesn't mean the window has focus yet; --tab with no active window
-      # makes a new one (2026-11-10 boot ended up with 2 windows). Wait for the window
-      # object, then give the shell a moment to focus it.
-      for j in $(seq 60); do [ "$(ptyxis_windows)" -ge 1 ] && break; sleep 1; done
-      sleep 8
-    else
-      sleep 3
-    fi
+    sleep 3
   fi
   first=0
 done < "$conf"
+# Close the plain starter tab once the sessions are in.
+[ $dry = 0 ] && [ -n "$starter" ] && [ "$first" = 0 ] && kill -HUP "$starter" 2>/dev/null
 [ $dry = 0 ] && { w=$(ptyxis_windows); echo "ptyxis windows: $w"; [ "$w" -gt 1 ] && echo "  WARN tabs split across $w windows"; }
